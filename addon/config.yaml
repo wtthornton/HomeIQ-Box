@@ -1,0 +1,4 @@
+name: "HomeIQ Box"
+description: "Placeholder Home Assistant add-on manifest (to be completed)."
+version: "0.0.1"
+slug: "homeiq_box"
