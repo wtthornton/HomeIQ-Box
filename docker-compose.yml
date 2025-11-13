@@ -671,6 +671,43 @@ services:
         max-file: "3"
         labels: "service=ha-setup-service,environment=production"
 
+  # ai-automation-service:
+  #   build:
+  #     context: .
+  #     dockerfile: services/ai-automation-service/Dockerfile
+  #   container_name: homeiq-ai-automation
+  #   restart: unless-stopped
+  #   ports:
+  #     - "8018:8018"
+  #   env_file:
+  #     - infrastructure/env.ai-automation.template
+  #   environment:
+  #     - DATA_API_URL=http://data-api:8006
+  #     - ENABLE_CLOUD_CONNECTORS=false
+  #     - ENABLE_PATTERN_MINER=false
+  #     - LOG_LEVEL=${LOG_LEVEL:-INFO}
+  #   depends_on:
+  #     data-api:
+  #       condition: service_healthy
+  #   networks:
+  #     - homeiq-network
+
+  # ai-automation-ui:
+  #   build:
+  #     context: .
+  #     dockerfile: services/ai-automation-ui/Dockerfile
+  #   container_name: homeiq-ai-automation-ui
+  #   restart: unless-stopped
+  #   ports:
+  #     - "3001:80"
+  #   environment:
+  #     - VITE_API_BASE_URL=http://localhost:8018
+  #   depends_on:
+  #     ai-automation-service:
+  #       condition: service_started
+  #   networks:
+  #     - homeiq-network
+
   # Optional calendar service, enable when calendar integration is configured
   # calendar:
   #   build:
