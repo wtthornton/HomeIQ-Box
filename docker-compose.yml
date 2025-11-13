@@ -1,0 +1,718 @@
+name: homeiq-box
+
+services:
+  influxdb:
+    image: influxdb:2.7
+    container_name: homeiq-influxdb
+    restart: unless-stopped
+    ports:
+      - "8086:8086"
+    environment:
+      - DOCKER_INFLUXDB_INIT_MODE=setup
+      - DOCKER_INFLUXDB_INIT_USERNAME=${INFLUXDB_USERNAME:-admin}
+      - DOCKER_INFLUXDB_INIT_PASSWORD=${INFLUXDB_PASSWORD:-admin123}
+      - DOCKER_INFLUXDB_INIT_ORG=${INFLUXDB_ORG:-homeiq}
+      - DOCKER_INFLUXDB_INIT_BUCKET=${INFLUXDB_BUCKET:-home_assistant_events}
+      - DOCKER_INFLUXDB_INIT_ADMIN_TOKEN=${INFLUXDB_TOKEN:-homeiq-token}
+    volumes:
+      - influxdb_data:/var/lib/influxdb2
+      - influxdb_config:/etc/influxdb2
+    networks:
+      - homeiq-network
+    deploy:
+      resources:
+        limits:
+          memory: 512M
+        reservations:
+          memory: 256M
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8086/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 40s
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "10m"
+        max-file: "3"
+        labels: "service=influxdb,environment=production"
+
+  data-api:
+    build:
+      context: .
+      dockerfile: services/data-api/Dockerfile
+    container_name: homeiq-data-api
+    restart: unless-stopped
+    ports:
+      - "8006:8006"
+    env_file:
+      - .env
+    environment:
+      - DATA_API_HOST=0.0.0.0
+      - DATA_API_PORT=8006
+      - INFLUXDB_URL=http://influxdb:8086
+      - INFLUXDB_TOKEN=${INFLUXDB_TOKEN:-homeiq-token}
+      - INFLUXDB_ORG=${INFLUXDB_ORG:-homeiq}
+      - INFLUXDB_BUCKET=${INFLUXDB_BUCKET:-home_assistant_events}
+      - DATABASE_URL=sqlite+aiosqlite:///./data/metadata.db
+      - SQLITE_TIMEOUT=30
+      - SQLITE_CACHE_SIZE=-64000
+      - LOG_LEVEL=${LOG_LEVEL:-INFO}
+      - ENABLE_AUTH=false
+      - API_KEY=${API_KEY:-}
+      - CORS_ORIGINS=http://localhost:3000,http://localhost
+    volumes:
+      - sqlite-data:/app/data
+    depends_on:
+      influxdb:
+        condition: service_healthy
+    networks:
+      - homeiq-network
+    deploy:
+      resources:
+        limits:
+          memory: 768M
+        reservations:
+          memory: 384M
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "10m"
+        max-file: "3"
+        labels: "service=data-api,environment=production"
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8006/health')"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 30s
+
+  websocket-ingestion:
+    build:
+      context: .
+      dockerfile: services/websocket-ingestion/Dockerfile
+    container_name: homeiq-websocket
+    restart: unless-stopped
+    ports:
+      - "8001:8001"
+    env_file:
+      - .env
+    environment:
+      - DOCKER_CONTAINER=true
+      - HA_HTTP_URL=${HA_HTTP_URL:-}
+      - HA_WS_URL=${HA_WS_URL:-}
+      - HA_TOKEN=${HA_TOKEN:-}
+      - NABU_CASA_URL=${NABU_CASA_URL:-}
+      - NABU_CASA_TOKEN=${NABU_CASA_TOKEN:-}
+      - DATA_API_URL=http://data-api:8006
+      - WEBSOCKET_INGESTION_PORT=8001
+      - ENABLE_HOME_ASSISTANT=true
+      - INFLUXDB_URL=http://influxdb:8086
+      - INFLUXDB_USERNAME=admin
+      - INFLUXDB_PASSWORD=admin123
+      - INFLUXDB_ORG=homeiq
+      - INFLUXDB_BUCKET=home_assistant_events
+      - INFLUXDB_TOKEN=${INFLUXDB_TOKEN:-homeiq-token}
+      - LOG_LEVEL=${LOG_LEVEL:-INFO}
+      - LOG_FILE_PATH=${LOG_FILE_PATH:-/app/logs}
+      - LOG_FORMAT=json
+      - LOG_OUTPUT=both
+      - WEBSOCKET_MAX_RETRIES=${WEBSOCKET_MAX_RETRIES:--1}
+      - WEBSOCKET_MAX_RETRY_DELAY=${WEBSOCKET_MAX_RETRY_DELAY:-300}
+      - STORE_DEVICE_HISTORY_IN_INFLUXDB=${STORE_DEVICE_HISTORY_IN_INFLUXDB:-false}
+      - WEATHER_API_KEY=${WEATHER_API_KEY:-}
+      - WEATHER_API_URL=${WEATHER_API_URL:-https://api.openweathermap.org/data/2.5}
+      - WEATHER_DEFAULT_LOCATION=${WEATHER_DEFAULT_LOCATION:-Las Vegas,NV,US}
+      - WEATHER_ENRICHMENT_ENABLED=${WEATHER_ENRICHMENT_ENABLED:-true}
+      - WEATHER_CACHE_MINUTES=${WEATHER_CACHE_MINUTES:-15}
+      - WEATHER_RATE_LIMIT_PER_MINUTE=${WEATHER_RATE_LIMIT_PER_MINUTE:-50}
+      - WEATHER_RATE_LIMIT_PER_DAY=${WEATHER_RATE_LIMIT_PER_DAY:-900}
+      - WEATHER_REQUEST_TIMEOUT=${WEATHER_REQUEST_TIMEOUT:-10}
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "10m"
+        max-file: "3"
+        labels: "service=websocket-ingestion,environment=production"
+    volumes:
+      - homeiq_logs:/var/log/homeiq
+    depends_on:
+      data-api:
+        condition: service_healthy
+    networks:
+      - homeiq-network
+    deploy:
+      resources:
+        limits:
+          memory: 512M
+        reservations:
+          memory: 256M
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8001/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 30s
+
+  admin-api:
+    build:
+      context: .
+      dockerfile: services/admin-api/Dockerfile
+    container_name: homeiq-admin
+    restart: unless-stopped
+    ports:
+      - "8003:8004"
+    env_file:
+      - .env
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock:ro
+      - ./infrastructure:/app/infrastructure:rw
+      - ./docker-compose.yml:/app/docker-compose.yml:ro
+    environment:
+      - LOG_LEVEL=${LOG_LEVEL:-INFO}
+      - LOG_FILE_PATH=${LOG_FILE_PATH:-/app/logs}
+      - LOG_FORMAT=json
+      - API_HOST=0.0.0.0
+      - API_PORT=8004
+      - ENABLE_AUTH=false
+      - DOCKER_HOST=unix:///var/run/docker.sock
+      - WEATHER_API_KEY=${WEATHER_API_KEY:-}
+      - HA_HTTP_URL=${HA_HTTP_URL:-${HOME_ASSISTANT_URL:-}}
+      - HA_URL=${HA_HTTP_URL:-${HOME_ASSISTANT_URL:-http://homeassistant:8123}}
+      - HA_TOKEN=${HOME_ASSISTANT_TOKEN:-${HA_TOKEN:-}}
+      - INFLUXDB_URL=http://influxdb:8086
+      - INFLUXDB_TOKEN=${INFLUXDB_TOKEN:-homeiq-token}
+      - INFLUXDB_ORG=${INFLUXDB_ORG:-homeiq}
+      - INFLUXDB_BUCKET=${INFLUXDB_BUCKET:-home_assistant_events}
+      - JWT_SECRET_KEY=${JWT_SECRET_KEY:-super-secret-jwt-key}
+      - JWT_ALGORITHM=${JWT_ALGORITHM:-HS256}
+      - ACCESS_TOKEN_EXPIRE_MINUTES=${ACCESS_TOKEN_EXPIRE_MINUTES:-30}
+      - ADMIN_PASSWORD=${ADMIN_PASSWORD:-adminpass}
+      - WEBSOCKET_INGESTION_URL=http://websocket-ingestion:8001
+      - DATA_API_URL=http://data-api:8006
+    depends_on:
+      influxdb:
+        condition: service_healthy
+      websocket-ingestion:
+        condition: service_healthy
+      data-api:
+        condition: service_healthy
+    networks:
+      - homeiq-network
+    deploy:
+      resources:
+        limits:
+          memory: 256M
+        reservations:
+          memory: 128M
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "10m"
+        max-file: "3"
+        labels: "service=admin-api,environment=production"
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8004/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 30s
+
+  data-retention:
+    build:
+      context: .
+      dockerfile: services/data-retention/Dockerfile
+    container_name: homeiq-data-retention
+    restart: unless-stopped
+    ports:
+      - "8080:8080"
+    env_file:
+      - .env
+    environment:
+      - INFLUXDB_URL=http://influxdb:8086
+      - INFLUXDB_TOKEN=${INFLUXDB_TOKEN:-homeiq-token}
+      - INFLUXDB_ORG=${INFLUXDB_ORG:-homeiq}
+      - INFLUXDB_BUCKET=${INFLUXDB_BUCKET:-home_assistant_events}
+      - LOG_LEVEL=${LOG_LEVEL:-INFO}
+      - LOG_FILE_PATH=${LOG_FILE_PATH:-/app/logs}
+      - LOG_FORMAT=json
+      - CLEANUP_INTERVAL_HOURS=${CLEANUP_INTERVAL_HOURS:-24}
+      - MONITORING_INTERVAL_MINUTES=${MONITORING_INTERVAL_MINUTES:-5}
+      - COMPRESSION_INTERVAL_HOURS=${COMPRESSION_INTERVAL_HOURS:-24}
+      - BACKUP_INTERVAL_HOURS=${BACKUP_INTERVAL_HOURS:-24}
+      - BACKUP_DIR=${BACKUP_DIR:-/backups}
+    depends_on:
+      influxdb:
+        condition: service_healthy
+    networks:
+      - homeiq-network
+    deploy:
+      resources:
+        limits:
+          memory: 256M
+        reservations:
+          memory: 128M
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "10m"
+        max-file: "3"
+        labels: "service=data-retention,environment=production"
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8080/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 30s
+    volumes:
+      - data_retention_backups:/backups
+
+  carbon-intensity:
+    build:
+      context: .
+      dockerfile: services/carbon-intensity-service/Dockerfile
+    container_name: homeiq-carbon-intensity
+    restart: unless-stopped
+    ports:
+      - "8010:8010"
+    env_file:
+      - .env
+    environment:
+      - WATTTIME_USERNAME=${WATTTIME_USERNAME:-}
+      - WATTTIME_PASSWORD=${WATTTIME_PASSWORD:-}
+      - WATTTIME_API_TOKEN=${WATTTIME_API_TOKEN:-}
+      - GRID_REGION=${GRID_REGION:-CAISO_NORTH}
+      - INFLUXDB_URL=http://influxdb:8086
+      - INFLUXDB_TOKEN=${INFLUXDB_TOKEN:-homeiq-token}
+      - INFLUXDB_ORG=${INFLUXDB_ORG:-homeiq}
+      - INFLUXDB_BUCKET=${INFLUXDB_BUCKET:-home_assistant_events}
+      - SERVICE_PORT=8010
+      - LOG_LEVEL=${LOG_LEVEL:-INFO}
+    depends_on:
+      influxdb:
+        condition: service_healthy
+    networks:
+      - homeiq-network
+    deploy:
+      resources:
+        limits:
+          memory: 192M
+        reservations:
+          memory: 96M
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "10m"
+        max-file: "3"
+        labels: "service=carbon-intensity,environment=production"
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8010/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 30s
+
+  electricity-pricing:
+    build:
+      context: .
+      dockerfile: services/electricity-pricing-service/Dockerfile
+    container_name: homeiq-electricity-pricing
+    restart: unless-stopped
+    ports:
+      - "8011:8011"
+    env_file:
+      - .env
+    environment:
+      - PRICING_PROVIDER=${PRICING_PROVIDER:-awattar}
+      - PRICING_API_KEY=${PRICING_API_KEY:-}
+      - INFLUXDB_URL=http://influxdb:8086
+      - INFLUXDB_TOKEN=${INFLUXDB_TOKEN:-homeiq-token}
+      - INFLUXDB_ORG=${INFLUXDB_ORG:-homeiq}
+      - INFLUXDB_BUCKET=${INFLUXDB_BUCKET:-home_assistant_events}
+      - SERVICE_PORT=8011
+      - LOG_LEVEL=${LOG_LEVEL:-INFO}
+    depends_on:
+      influxdb:
+        condition: service_healthy
+    networks:
+      - homeiq-network
+    deploy:
+      resources:
+        limits:
+          memory: 192M
+        reservations:
+          memory: 96M
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "10m"
+        max-file: "3"
+        labels: "service=electricity-pricing,environment=production"
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8011/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 30s
+
+  air-quality:
+    build:
+      context: .
+      dockerfile: services/air-quality-service/Dockerfile
+    container_name: homeiq-air-quality
+    restart: unless-stopped
+    ports:
+      - "8012:8012"
+    env_file:
+      - .env
+    environment:
+      - WEATHER_API_KEY=${WEATHER_API_KEY:-}
+      - LATITUDE=${LATITUDE:-36.1699}
+      - LONGITUDE=${LONGITUDE:--115.1398}
+      - HOME_ASSISTANT_URL=${HA_HTTP_URL:-${HOME_ASSISTANT_URL:-}}
+      - HOME_ASSISTANT_TOKEN=${HA_TOKEN:-${HOME_ASSISTANT_TOKEN:-}}
+      - INFLUXDB_URL=http://influxdb:8086
+      - INFLUXDB_TOKEN=${INFLUXDB_TOKEN:-homeiq-token}
+      - INFLUXDB_ORG=${INFLUXDB_ORG:-homeiq}
+      - INFLUXDB_BUCKET=${INFLUXDB_BUCKET:-home_assistant_events}
+      - SERVICE_PORT=8012
+      - LOG_LEVEL=${LOG_LEVEL:-INFO}
+    depends_on:
+      influxdb:
+        condition: service_healthy
+    networks:
+      - homeiq-network
+    deploy:
+      resources:
+        limits:
+          memory: 192M
+        reservations:
+          memory: 96M
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "10m"
+        max-file: "3"
+        labels: "service=air-quality,environment=production"
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8012/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 30s
+
+  weather-api:
+    build:
+      context: .
+      dockerfile: services/weather-api/Dockerfile
+    container_name: homeiq-weather-api
+    restart: unless-stopped
+    ports:
+      - "8009:8009"
+    env_file:
+      - .env
+    environment:
+      - SERVICE_PORT=8009
+      - WEATHER_API_KEY=${WEATHER_API_KEY:-}
+      - WEATHER_LOCATION=${WEATHER_LOCATION:-Las Vegas}
+      - CACHE_TTL_SECONDS=900
+      - FETCH_INTERVAL_SECONDS=300
+      - INFLUXDB_URL=http://influxdb:8086
+      - INFLUXDB_TOKEN=${INFLUXDB_TOKEN:-homeiq-token}
+      - INFLUXDB_ORG=${INFLUXDB_ORG:-homeiq}
+      - INFLUXDB_BUCKET=weather_data
+      - LOG_LEVEL=${LOG_LEVEL:-INFO}
+    depends_on:
+      influxdb:
+        condition: service_healthy
+    networks:
+      - homeiq-network
+    deploy:
+      resources:
+        limits:
+          memory: 192M
+        reservations:
+          memory: 96M
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "10m"
+        max-file: "3"
+        labels: "service=weather-api,environment=production"
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8009/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 40s
+
+  smart-meter:
+    build:
+      context: .
+      dockerfile: services/smart-meter-service/Dockerfile
+    container_name: homeiq-smart-meter
+    restart: unless-stopped
+    ports:
+      - "8014:8014"
+    env_file:
+      - .env
+    environment:
+      - METER_TYPE=${METER_TYPE:-home_assistant}
+      - HA_HTTP_URL=${HA_HTTP_URL:-}
+      - HA_WS_URL=${HA_WS_URL:-}
+      - HA_TOKEN=${HA_TOKEN:-}
+      - NABU_CASA_URL=${NABU_CASA_URL:-}
+      - NABU_CASA_TOKEN=${NABU_CASA_TOKEN:-}
+      - INFLUXDB_URL=http://influxdb:8086
+      - INFLUXDB_TOKEN=${INFLUXDB_TOKEN:-homeiq-token}
+      - INFLUXDB_ORG=${INFLUXDB_ORG:-homeiq}
+      - INFLUXDB_BUCKET=${INFLUXDB_BUCKET:-home_assistant_events}
+      - SERVICE_PORT=8014
+      - LOG_LEVEL=${LOG_LEVEL:-INFO}
+    depends_on:
+      influxdb:
+        condition: service_healthy
+    networks:
+      - homeiq-network
+    deploy:
+      resources:
+        limits:
+          memory: 192M
+        reservations:
+          memory: 96M
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "10m"
+        max-file: "3"
+        labels: "service=smart-meter,environment=production"
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8014/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 30s
+
+  energy-correlator:
+    build:
+      context: .
+      dockerfile: services/energy-correlator/Dockerfile
+    container_name: homeiq-energy-correlator
+    restart: unless-stopped
+    ports:
+      - "8017:8017"
+    env_file:
+      - .env
+    environment:
+      - INFLUXDB_URL=http://influxdb:8086
+      - INFLUXDB_TOKEN=${INFLUXDB_TOKEN:-homeiq-token}
+      - INFLUXDB_ORG=${INFLUXDB_ORG:-homeiq}
+      - INFLUXDB_BUCKET=${INFLUXDB_BUCKET:-home_assistant_events}
+      - PROCESSING_INTERVAL=${ENERGY_CORRELATION_INTERVAL:-60}
+      - LOOKBACK_MINUTES=${ENERGY_LOOKBACK_MINUTES:-5}
+      - SERVICE_PORT=8017
+      - LOG_LEVEL=${LOG_LEVEL:-INFO}
+    depends_on:
+      influxdb:
+        condition: service_healthy
+      smart-meter:
+        condition: service_started
+    networks:
+      - homeiq-network
+    deploy:
+      resources:
+        limits:
+          memory: 256M
+        reservations:
+          memory: 128M
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "10m"
+        max-file: "3"
+        labels: "service=energy-correlator,environment=production"
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8017/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 30s
+
+  health-dashboard:
+    build:
+      context: ./services/health-dashboard
+      dockerfile: Dockerfile
+    container_name: homeiq-dashboard
+    restart: unless-stopped
+    ports:
+      - "3000:80"
+    environment:
+      - VITE_API_BASE_URL=http://localhost:8003
+      - VITE_DATA_API_URL=http://localhost:8006
+      - VITE_WS_URL=ws://localhost:8001/ws
+      - VITE_ENVIRONMENT=production
+    depends_on:
+      admin-api:
+        condition: service_healthy
+    networks:
+      - homeiq-network
+    deploy:
+      resources:
+        limits:
+          memory: 256M
+        reservations:
+          memory: 128M
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "10m"
+        max-file: "3"
+        labels: "service=health-dashboard,environment=production"
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 30s
+
+  log-aggregator:
+    build:
+      context: .
+      dockerfile: services/log-aggregator/Dockerfile
+    container_name: homeiq-log-aggregator
+    restart: unless-stopped
+    ports:
+      - "8015:8015"
+    env_file:
+      - .env
+    environment:
+      - LOG_LEVEL=${LOG_LEVEL:-INFO}
+      - LOG_FILE_PATH=${LOG_FILE_PATH:-/app/logs}
+      - LOG_FORMAT=json
+      - PORT=8015
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock:ro
+      - ./logs:/app/logs
+      - homeiq_logs:/var/log/homeiq
+    group_add:
+      - "0"
+    networks:
+      - homeiq-network
+    deploy:
+      resources:
+        limits:
+          memory: 128M
+        reservations:
+          memory: 64M
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "10m"
+        max-file: "3"
+        labels: "service=log-aggregator,environment=production"
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8015/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 30s
+
+  ha-setup-service:
+    build:
+      context: .
+      dockerfile: services/ha-setup-service/Dockerfile
+    container_name: homeiq-setup-service
+    restart: unless-stopped
+    ports:
+      - "8027:8020"
+    env_file:
+      - .env
+      - infrastructure/env.websocket.template
+    environment:
+      - SERVICE_NAME=ha-setup-service
+      - SERVICE_PORT=8020
+      - LOG_LEVEL=${LOG_LEVEL:-INFO}
+      - HA_URL=${HA_HTTP_URL:-${HOME_ASSISTANT_URL:-http://homeassistant:8123}}
+      - HA_TOKEN=${HOME_ASSISTANT_TOKEN:-${HA_TOKEN:-}}
+      - DATABASE_URL=sqlite+aiosqlite:///./data/ha-setup.db
+      - DATA_API_URL=http://data-api:8006
+      - ADMIN_API_URL=http://admin-api:8004
+      - HEALTH_CHECK_INTERVAL=60
+      - INTEGRATION_CHECK_INTERVAL=300
+      - ENABLE_PERFORMANCE_MONITORING=true
+      - PERFORMANCE_SAMPLE_INTERVAL=30
+    volumes:
+      - ha_setup_data:/app/data
+      - homeiq_logs:/var/log/homeiq
+    depends_on:
+      data-api:
+        condition: service_healthy
+      admin-api:
+        condition: service_healthy
+    networks:
+      - homeiq-network
+    deploy:
+      resources:
+        limits:
+          memory: 256M
+        reservations:
+          memory: 128M
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8020/health')"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 30s
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "10m"
+        max-file: "3"
+        labels: "service=ha-setup-service,environment=production"
+
+  # Optional calendar service, enable when calendar integration is configured
+  # calendar:
+  #   build:
+  #     context: .
+  #     dockerfile: services/calendar-service/Dockerfile
+  #   container_name: homeiq-calendar
+  #   restart: unless-stopped
+  #   ports:
+  #     - "8013:8013"
+  #   env_file:
+  #     - .env
+  #   environment:
+  #     - HA_HTTP_URL=${HA_HTTP_URL:-}
+  #     - HA_TOKEN=${HA_TOKEN:-}
+  #     - CALENDAR_ENTITIES=${CALENDAR_ENTITIES:-calendar.primary}
+  #     - CALENDAR_FETCH_INTERVAL=${CALENDAR_FETCH_INTERVAL:-900}
+  #     - INFLUXDB_URL=http://influxdb:8086
+  #     - INFLUXDB_TOKEN=${INFLUXDB_TOKEN:-homeiq-token}
+  #     - INFLUXDB_ORG=${INFLUXDB_ORG:-homeiq}
+  #     - INFLUXDB_BUCKET=${INFLUXDB_BUCKET:-home_assistant_events}
+  #     - SERVICE_PORT=8013
+  #     - LOG_LEVEL=${LOG_LEVEL:-INFO}
+  #   depends_on:
+  #     influxdb:
+  #       condition: service_healthy
+  #   networks:
+  #     - homeiq-network
+  #   healthcheck:
+  #     test: ["CMD", "curl", "-f", "http://localhost:8013/health"]
+  #     interval: 30s
+  #     timeout: 10s
+  #     retries: 3
+  #     start_period: 30s
+
+volumes:
+  influxdb_data:
+  influxdb_config:
+  sqlite-data:
+  data_retention_backups:
+  homeiq_logs:
+  ha_setup_data:
+
+networks:
+  homeiq-network:
+    driver: bridge
